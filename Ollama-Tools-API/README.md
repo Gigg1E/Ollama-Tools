@@ -4,12 +4,16 @@ A lightweight utility API that provides real-world data access for AI models (Ol
 
 ## 🚀 Features
 
-- **Web Search** - DuckDuckGo search results
-- **Weather** - Current weather and forecasts
-- **Timezones** - Timezone information and conversions
-- **Geolocation** - Coordinates lookup and reverse geocoding
-- **IP Tools** - IP lookup, DNS resolution, ping tests
-- **Time** - UTC and local time information
+- **Web Search & News** — Tavily API, with automatic fallback to SerpApi if Tavily fails
+- **Weather** — current conditions, forecast, and active severe-weather alerts
+- **Timezones** — lookup by name and a full list of available timezones
+- **Geolocation** — forward geocoding (place → coordinates) and reverse (coordinates → place)
+- **IP & Network Diagnostics** — IP lookup, DNS resolution, ping, ASN/BGP info, MAC address vendor lookup, HTTP status/latency check, TLS/SSL certificate check
+- **Phone Numbers** — validation, formatting, type, and country; optional carrier/line-type enrichment
+- **Security / Dev Utilities** — hashing (MD5/SHA1/SHA256/SHA512), Base64 encode/decode, CIDR subnet calculator, WHOIS/RDAP domain lookup, CVE vulnerability lookup
+- **Crypto Prices** — current USD price, 24h change, and market cap for major coins
+- **NASA APOD** — Astronomy Picture of the Day
+- **Time** — current UTC, local, and unix time
 
 ## 📦 Installation
 
@@ -20,6 +24,9 @@ cd ollama-tools-api
 
 # Install dependencies
 npm install
+
+# Copy the env template and fill in what you need (see API Keys below)
+cp .env.example .env
 
 # Start the server
 npm start
@@ -52,7 +59,7 @@ pm2 logs ollama-tools
 GET /health
 ```
 
-### Web Search
+### Web Search & News
 ```bash
 POST /api/search
 Body: {
@@ -60,12 +67,23 @@ Body: {
   "num_results": 5
 }
 ```
+Tries Tavily first; if that fails for any reason (rate limit, quota, network error), it automatically retries with SerpApi.
+
+```bash
+GET /api/news/london%20flooding?num_results=5
+```
+Same search, tagged as a news query.
 
 ### Weather
 ```bash
 GET /api/weather/London
 GET /api/weather/Jacksonville,FL
 ```
+
+```bash
+GET /api/weather-alerts/Miami,FL
+```
+Active severe weather alerts — NWS for US locations, a condition-based fallback (via wttr.in) elsewhere.
 
 ### Timezone
 ```bash
@@ -81,16 +99,52 @@ GET /api/reverse-geocode/48.8584/2.2945
 
 ### IP & Network Tools
 ```bash
-GET /api/ip                    # Your IP info
-GET /api/ip/8.8.8.8           # Lookup specific IP
-GET /api/dns/google.com        # DNS lookup
-GET /api/ping/google.com       # Ping test
+GET /api/ip                              # Your IP info
+GET /api/ip/8.8.8.8                      # Lookup specific IP
+GET /api/dns/google.com                  # DNS lookup
+GET /api/ping/google.com                 # Ping test
+GET /api/asn/8.8.8.8                     # ASN / BGP info for an IP
+GET /api/mac/00:1A:2B:3C:4D:5E           # MAC address vendor lookup (cached 24h)
+GET /api/http-status?url=https://example.com  # Reachability + latency
+GET /api/ssl/example.com                 # TLS certificate details (?port= optional)
+```
+
+### Phone Numbers
+```bash
+GET /api/phone/+15551234567
+GET /api/phone/5551234567?country=US
+```
+Validation, formatting (international/national/E.164), country, and number type, all done locally. If `NUMVERIFY_API_KEY` is configured, the response is enriched with carrier and line-type info.
+
+### Security / Dev Utilities
+```bash
+POST /api/hash
+Body: { "text": "hello", "algorithm": "sha256" }   # md5 | sha1 | sha256 | sha512
+
+POST /api/base64
+Body: { "text": "hello", "mode": "encode" }        # encode | decode
+
+POST /api/subnet
+Body: { "cidr": "192.168.1.0/24" }
+
+GET /api/whois/example.com       # RDAP domain lookup
+GET /api/cve/CVE-2024-12345      # Vulnerability details from NVD
+```
+
+### Crypto
+```bash
+GET /api/crypto/btc   # also: eth, ltc, doge, sol, ada, xrp, bnb, matic, dot, link, avax, atom, near, shib
+```
+
+### NASA
+```bash
+GET /api/apod   # Astronomy Picture of the Day
 ```
 
 ### Utilities
 ```bash
-GET /api/time                  # Current time
-GET /api/endpoints             # List all endpoints
+GET /api/time                  # Current time (UTC, local, unix)
+GET /api/endpoints             # Machine-readable list of every endpoint
 ```
 
 ## 🤖 Using with Ollama
@@ -182,7 +236,7 @@ client.login('YOUR_BOT_TOKEN');
 
 ## 🔐 Configuration
 
-You can customize the port in `server.js` or use environment variables:
+Copy `.env.example` to `.env` and set `PORT` plus whichever API keys you need (see below).
 
 ```bash
 # Default port is 3100
@@ -191,6 +245,17 @@ PORT=3100 npm start
 # Or with PM2
 PORT=3200 pm2 start server.js --name ollama-tools
 ```
+
+## 🔑 API Keys
+
+| Feature | Env var | Required? |
+|---|---|---|
+| Web search / news | `TAVILY_API_KEY` | **Yes** — search and news endpoints fail without it |
+| Search fallback | `SERPAPI_KEY` | Optional, but recommended — used automatically if Tavily fails |
+| NASA APOD | `NASA_API_KEY` | Optional — falls back to `DEMO_KEY` (rate-limited: 30/hr, 50/day) |
+| Phone carrier/line-type enrichment | `NUMVERIFY_API_KEY` | Optional — phone validation and formatting still work without it, just without carrier/line-type detail |
+
+Everything else — weather, weather alerts, timezones, geolocation, IP/DNS/ping, ASN, MAC lookup, hashing, Base64, subnet calculator, WHOIS, CVE lookup, crypto prices, SSL check, and HTTP status check — uses free, keyless public APIs.
 
 ## 🛠️ Advanced Usage
 
@@ -239,10 +304,10 @@ async function aiWithTools(prompt) {
 
 ## 📝 Notes
 
-- **Rate Limits**: Some free APIs have rate limits. Add caching if needed.
+- **Rate Limits**: Some free APIs have rate limits (see the API Keys table for Tavily/SerpApi/NASA specifics). Add caching if needed.
 - **Error Handling**: The API returns errors with appropriate status codes.
 - **CORS**: Not enabled by default. Add if needed for browser access.
-- **API Keys**: All endpoints use free services, no keys required.
+- **API Keys**: Most endpoints are keyless. Search (`/api/search`, `/api/news`) needs `TAVILY_API_KEY` to work at all — everything else works out of the box, with a few optional keys that add extra detail (see the table above).
 
 ## 🔄 Updating & Maintenance
 
@@ -280,6 +345,9 @@ pm2 save
 
 ### Network requests failing
 Check your firewall and internet connection. The API uses external services.
+
+### Search returning errors
+`/api/search` and `/api/news` need `TAVILY_API_KEY` set — without it (and without `SERPAPI_KEY` as a fallback) those two endpoints will fail. Every other endpoint works without any key.
 
 ## 📚 API Response Examples
 
@@ -322,13 +390,24 @@ Check your firewall and internet connection. The API uses external services.
 }
 ```
 
+**Crypto Price:**
+```json
+{
+  "symbol": "BTC",
+  "id": "bitcoin",
+  "price_usd": 67234.12,
+  "change_24h": 1.84,
+  "market_cap_usd": 1324000000000
+}
+```
+
 ## 🎯 Use Cases
 
 - **Chatbots** - Give your bots real-world knowledge
 - **Automation** - Trigger actions based on weather, time, etc.
 - **Data Collection** - Gather information for analysis
 - **Testing** - Mock external API calls
-- **Monitoring** - Track IP addresses and network status
+- **Monitoring** - Track IP addresses, network status, SSL cert expiry, and site uptime
 
 ---
 
