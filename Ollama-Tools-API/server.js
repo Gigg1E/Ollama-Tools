@@ -1,7 +1,6 @@
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
-const cheerio = require('cheerio');
 const dns = require('dns').promises;
 const { execSync } = require('child_process');
 const { PhoneNumberUtil, PhoneNumberFormat } = require('google-libphonenumber');
@@ -14,38 +13,80 @@ const PORT = process.env.PORT || 3100;
 
 app.use(express.json());
 
+// ==================== TAVILY SEARCH HELPER ====================
+// Replaces the old DuckDuckGo HTML-scraping approach, which DuckDuckGo
+// started blocking with anti-bot 'anomaly' pages (silently returning zero
+// results instead of an error). Tavily is a real API meant for programmatic
+// use, so this fails loudly instead of silently.
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
+
+async function tavilySearch(query, { topic = 'general', maxResults = 5 } = {}) {
+  if (!TAVILY_API_KEY) {
+    throw new Error('TAVILY_API_KEY not configured');
+  }
+  const { data } = await axios.post(
+    'https://api.tavily.com/search',
+    { query, topic, max_results: maxResults },
+    { headers: { Authorization: `Bearer ${TAVILY_API_KEY}`, 'Content-Type': 'application/json' } }
+  );
+  return (data.results || []).map((r) => ({
+    title: r.title,
+    snippet: r.content,
+    url: r.url,
+  }));
+}
+
+// Fallback for when Tavily is rate-limited, out of quota, or down. Separate
+// vendor/infra from Tavily on purpose, so a Tavily-side outage or its 1/min
+// free-tier rate limit doesn't take this out too.
+const SERPAPI_KEY = process.env.SERPAPI_KEY;
+
+async function serpApiSearch(query, { news = false, maxResults = 5 } = {}) {
+  if (!SERPAPI_KEY) {
+    throw new Error('SERPAPI_KEY not configured');
+  }
+  const params = { engine: 'google', q: query, num: maxResults, api_key: SERPAPI_KEY, hl: 'en', gl: 'us' };
+  if (news) params.tbm = 'nws';
+
+  const { data } = await axios.get('https://serpapi.com/search.json', { params });
+  const items = news ? (data.news_results || []) : (data.organic_results || []);
+  return items.slice(0, maxResults).map((r) => ({
+    title: r.title,
+    snippet: r.snippet || '',
+    url: r.link,
+  }));
+}
+
+// Tries Tavily first (better result quality, larger free tier); falls back
+// to SerpApi on ANY Tavily failure — rate limit, quota exhausted, network
+// error, etc. — not just a specific status code, so this stays resilient
+// without needing to keep track of exactly which failure modes Tavily uses.
+// Everyday traffic stays on Tavily; SerpApi's smaller recurring free tier
+// only gets used on the rare occasion Tavily says no.
+async function webSearch(query, { topic = 'general', maxResults = 5 } = {}) {
+  try {
+    return await tavilySearch(query, { topic, maxResults });
+  } catch (err) {
+    console.warn(`[search] Tavily failed (${err.message}), falling back to SerpApi`);
+    return await serpApiSearch(query, { news: topic === 'news', maxResults });
+  }
+}
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// ==================== WEB SEARCH ====================
+// ==================== WEB SEARCH (Tavily) ====================
 app.post('/api/search', async (req, res) => {
   try {
     const { query, num_results = 5 } = req.body;
-    
+
     if (!query) {
       return res.status(400).json({ error: 'Query parameter required' });
     }
 
-    // Using DuckDuckGo HTML search (no API key needed)
-    const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-    const response = await axios.get(searchUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-
-    const $ = cheerio.load(response.data);
-    const results = [];
-
-    $('.result').slice(0, num_results).each((i, elem) => {
-      const title = $(elem).find('.result__title').text().trim();
-      const snippet = $(elem).find('.result__snippet').text().trim();
-      const url = $(elem).find('.result__url').text().trim();
-      
-      if (title && url) {
-        results.push({ title, snippet, url });
-      }
-    });
+    const results = await webSearch(query, { topic: 'general', maxResults: num_results });
 
     res.json({
       query,
@@ -54,9 +95,9 @@ app.post('/api/search', async (req, res) => {
       timestamp: new Date().toISOString()
     });
   } catch (error) {
-    res.status(500).json({ 
-      error: 'Search failed', 
-      details: error.message 
+    res.status(500).json({
+      error: 'Search failed',
+      details: error.message
     });
   }
 });
@@ -447,30 +488,13 @@ app.get('/api/apod', async (req, res) => {
   }
 });
 
-// ==================== NEWS SEARCH ====================
+// ==================== NEWS SEARCH (Tavily) ====================
 app.get('/api/news/:query', async (req, res) => {
   try {
     const { query } = req.params;
     const num_results = parseInt(req.query.num_results) || 5;
 
-    // DuckDuckGo news tab via HTML scraping
-    const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query + ' news')}&ia=news`;
-    const response = await axios.get(searchUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-    });
-
-    const $ = cheerio.load(response.data);
-    const results = [];
-
-    $('.result').slice(0, num_results).each((i, elem) => {
-      const title = $(elem).find('.result__title').text().trim();
-      const snippet = $(elem).find('.result__snippet').text().trim();
-      const url = $(elem).find('.result__url').text().trim();
-
-      if (title && url) {
-        results.push({ title, snippet, url });
-      }
-    });
+    const results = await webSearch(query, { topic: 'news', maxResults: num_results });
 
     res.json({ query, results, count: results.length, timestamp: new Date().toISOString() });
   } catch (error) {
@@ -681,6 +705,40 @@ app.get('/api/http-status', async (req, res) => {
       timestamp: new Date().toISOString()
     });
   } catch (e) { res.status(500).json({ error: 'HTTP status check failed', details: e.message }); }
+});
+
+// ==================== MAC ADDRESS LOOKUP ====================
+const macCache = new Map(); // { normalizedMac -> { data, expiresAt } }
+const MAC_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+
+app.get('/api/mac/:address', async (req, res) => {
+  const raw = req.params.address;
+  const norm = raw.replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
+  if (norm.length !== 12) return res.status(400).json({ error: 'Invalid MAC address' });
+
+  // Return cached result if available
+  const cached = macCache.get(norm);
+  if (cached && cached.expiresAt > Date.now()) return res.json(cached.data);
+
+  try {
+    const response = await axios.get(`https://api.maclookup.app/v2/macs/${raw}`, { timeout: 8000 });
+    const d = response.data;
+    const result = {
+      mac: raw.toUpperCase(),
+      found: d.found,
+      vendor: d.company || 'Unknown',
+      oui: d.macPrefix,
+      country: d.country,
+      block_type: d.blockType,
+      is_private: d.isPrivate,
+      is_randomized: d.isRand,
+      timestamp: new Date().toISOString()
+    };
+    macCache.set(norm, { data: result, expiresAt: Date.now() + MAC_CACHE_TTL });
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: 'MAC lookup failed', details: e.message });
+  }
 });
 
 // Start server
