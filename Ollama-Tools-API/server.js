@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const dns = require('dns').promises;
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const { PhoneNumberUtil, PhoneNumberFormat } = require('google-libphonenumber');
 const phoneUtil = PhoneNumberUtil.getInstance();
 const crypto = require('crypto');
@@ -368,21 +368,33 @@ app.get('/api/dns/:hostname', async (req, res) => {
 });
 
 // Ping test
+// `host` used to be interpolated straight into a shell command string and
+// run with execSync — anyone reachable could inject shell metacharacters
+// (&, |, ;, $(), ...) and run arbitrary commands as the server's user, and
+// since app.listen(PORT) binds all interfaces, that meant anyone on the
+// network, not just localhost. Fixed two ways: execFileSync runs `ping`
+// directly with an argument array, with no shell involved at all to inject
+// into; the hostname allowlist below is defense-in-depth on top of that,
+// rejecting anything that isn't plausibly a hostname/IP before it ever
+// reaches the ping binary.
+const PING_HOST_RE = /^[a-zA-Z0-9.:-]{1,253}$/;
+
 app.get('/api/ping/:host', async (req, res) => {
   try {
     const { host } = req.params;
-    
-    // Execute ping command (cross-platform)
+
+    if (!PING_HOST_RE.test(host)) {
+      return res.status(400).json({ error: 'Invalid host' });
+    }
+
     const isWindows = process.platform === 'win32';
-    const pingCmd = isWindows 
-      ? `ping -n 4 ${host}` 
-      : `ping -c 4 ${host}`;
-    
-    const output = execSync(pingCmd, { encoding: 'utf-8', timeout: 10000 });
-    
+    const args = isWindows ? ['-n', '4', host] : ['-c', '4', host];
+
+    const output = execFileSync('ping', args, { encoding: 'utf-8', timeout: 10000 });
+
     // Parse ping results (basic)
     const alive = !output.toLowerCase().includes('100% packet loss');
-    
+
     res.json({
       host,
       alive,
